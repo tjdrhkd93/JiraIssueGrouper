@@ -349,6 +349,19 @@ class App(tk.Tk):
         self.send_btn.pack(side="right")
         self._btn(res_hdr, "복사", self._copy, self.f).pack(side="right", padx=(0, 8))
 
+        # 필터 검색창
+        filter_row = tk.Frame(body, bg=BG)
+        filter_row.pack(fill="x", pady=(0, 6))
+        tk.Label(filter_row, text="담당자", font=self.f, bg=BG, fg=FG2, width=6, anchor="w").pack(side="left")
+        self.filter_assignee_var = tk.StringVar()
+        self.filter_assignee_var.trace_add("write", lambda *_: self._apply_filter())
+        self._entry(filter_row, self.filter_assignee_var, self.fmono).pack(side="left", fill="x", expand=True, padx=(4, 14))
+        tk.Label(filter_row, text="제목", font=self.f, bg=BG, fg=FG2, width=4, anchor="w").pack(side="left")
+        self.filter_title_var = tk.StringVar()
+        self.filter_title_var.trace_add("write", lambda *_: self._apply_filter())
+        self._entry(filter_row, self.filter_title_var, self.fmono).pack(side="left", fill="x", expand=True, padx=(4, 0))
+        self._btn(filter_row, "초기화", self._clear_filter, self.f).pack(side="right", padx=(8, 0))
+
         txt_wrap = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
         txt_wrap.pack(fill="both", expand=True)
         self.result_text = tk.Text(txt_wrap, font=self.fmono, wrap="word",
@@ -557,6 +570,7 @@ class App(tk.Tk):
                     return
                 mentions = self.cfg.get("slack_mentions", {})
                 self._last_issues = issues
+                self.after(0, self._clear_filter)
                 result, ti, ta, names = group_and_format(issues, domain, fmt, mentions)
                 self.after(0, lambda: self._set_result(result))
                 self.after(0, lambda: self.count_lbl.configure(text=f"총 {ti}건  /  담당자 {ta}명"))
@@ -584,8 +598,9 @@ class App(tk.Tk):
         domain          = self.domain_var.get().strip()
         jql             = self.jql_text.get("1.0", "end").strip()
         mentions        = self.cfg.get("slack_mentions", {})
-        assignee_blocks = build_slack_blocks(self._last_issues, domain, mentions)
-        total_issues    = len(self._last_issues)
+        filtered        = self._filtered_issues()
+        assignee_blocks = build_slack_blocks(filtered, domain, mentions)
+        total_issues    = len(filtered)
         total_assignees = len(assignee_blocks)
 
         self.send_btn.configure(state="disabled", text="전송 중…")
@@ -602,6 +617,45 @@ class App(tk.Tk):
                 self.after(0, lambda: self.send_btn.configure(state="normal", text="✈  Slack 전송"))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _filtered_issues(self):
+        """현재 필터 조건에 맞는 이슈 반환"""
+        if not hasattr(self, "_last_issues") or not self._last_issues:
+            return []
+        assignee_kw = self.filter_assignee_var.get().strip().lower()
+        title_kw    = self.filter_title_var.get().strip().lower()
+        result = []
+        for iss in self._last_issues:
+            assignee = (iss["fields"].get("assignee") or {}).get("displayName", "미배정").lower()
+            summary  = iss["fields"].get("summary", "").lower()
+            if assignee_kw and assignee_kw not in assignee:
+                continue
+            if title_kw and title_kw not in summary:
+                continue
+            result.append(iss)
+        return result
+
+    def _apply_filter(self):
+        """필터 변경 시 결과창 즉시 갱신"""
+        if not hasattr(self, "_last_issues") or not self._last_issues:
+            return
+        domain   = self.domain_var.get().strip()
+        fmt      = self.fmt_var.get()
+        mentions = self.cfg.get("slack_mentions", {})
+        filtered = self._filtered_issues()
+        if not filtered:
+            self._set_result("(필터 조건에 맞는 이슈 없음)")
+            self.count_lbl.configure(text="0건")
+            return
+        result, ti, ta, _ = group_and_format(filtered, domain, fmt, mentions)
+        self._set_result(result)
+        total = len(self._last_issues)
+        suffix = f"  (전체 {total}건)" if ti < total else ""
+        self.count_lbl.configure(text=f"총 {ti}건  /  담당자 {ta}명{suffix}")
+
+    def _clear_filter(self):
+        self.filter_assignee_var.set("")
+        self.filter_title_var.set("")
 
     def _copy(self):
         txt = self.result_text.get("1.0", "end").strip()
