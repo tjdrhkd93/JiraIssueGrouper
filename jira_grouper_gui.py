@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "slack_mentions": {},
     "slack_bot_token": "",
     "slack_my_uid": "",
+    "jql_history": [],
 }
 
 BG   = "#1e1e2e"
@@ -318,7 +319,12 @@ class App(tk.Tk):
 
         tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=8)
 
-        tk.Label(body, text="JQL", font=self.fs, bg=BG, fg=FG2).pack(anchor="w", pady=(0, 4))
+        jql_hdr = tk.Frame(body, bg=BG)
+        jql_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(jql_hdr, text="JQL", font=self.fs, bg=BG, fg=FG2).pack(side="left")
+        self.history_btn = self._btn(jql_hdr, "▾ 최근 기록", self._show_history_menu, self.f)
+        self.history_btn.pack(side="right")
+
         self.jql_text = tk.Text(body, height=3, font=self.fmono,
                                 bg=BG3, fg=FG, insertbackground=FG,
                                 relief="flat", bd=0, padx=8, pady=6, wrap="word",
@@ -555,6 +561,14 @@ class App(tk.Tk):
             messagebox.showwarning("입력 확인", "도메인, 이메일, API 토큰, JQL을 모두 입력해 주세요.")
             return
         self.cfg.update({"last_jql": jql, "fmt": fmt})
+        # 히스토리 저장 (최대 10개, 중복 제거 후 가장 최근이 뒤로)
+        import datetime
+        ts = datetime.datetime.now().strftime("%y-%m-%d %H:%M:%S")
+        history = self.cfg.get("jql_history", [])
+        # 동일 JQL 있으면 제거
+        history = [h for h in history if h.get("jql") != jql]
+        history.append({"jql": jql, "ts": ts})
+        self.cfg["jql_history"] = history[-10:]
         save_config(self.cfg)
         self.run_btn.configure(state="disabled", text="조회 중…")
         self._set_status("", "")
@@ -652,6 +666,39 @@ class App(tk.Tk):
         total = len(self._last_issues)
         suffix = f"  (전체 {total}건)" if ti < total else ""
         self.count_lbl.configure(text=f"총 {ti}건  /  담당자 {ta}명{suffix}")
+
+    def _show_history_menu(self):
+        history = self.cfg.get("jql_history", [])
+        if not history:
+            self._set_status("저장된 JQL 기록 없음", FG2)
+            return
+        menu = tk.Menu(self, tearoff=0, bg=BG2, fg=FG, activebackground=ACC,
+                       activeforeground="#fff", font=self.fmono,
+                       relief="flat", bd=0)
+        # 오래된 것부터 1번, 가장 최근이 마지막 번호
+        for idx, entry in enumerate(history, 1):
+            if isinstance(entry, dict):
+                jql = entry.get("jql", "")
+                ts  = entry.get("ts", "")
+            else:
+                jql, ts = entry, ""
+            jql_preview = jql if len(jql) <= 50 else jql[:47] + "..."
+            label = f"{idx}. ({ts})  {jql_preview}" if ts else f"{idx}. {jql_preview}"
+            menu.add_command(label=label, command=lambda j=jql: self._apply_history(j))
+        menu.add_separator()
+        menu.add_command(label="기록 전체 삭제", command=self._clear_history)
+        x = self.history_btn.winfo_rootx()
+        y = self.history_btn.winfo_rooty() + self.history_btn.winfo_height()
+        menu.tk_popup(x, y)
+
+    def _apply_history(self, jql):
+        self.jql_text.delete("1.0", "end")
+        self.jql_text.insert("1.0", jql)
+
+    def _clear_history(self):
+        self.cfg["jql_history"] = []
+        save_config(self.cfg)
+        self._set_status("JQL 기록 삭제됨", OK)
 
     def _clear_filter(self):
         self.filter_assignee_var.set("")
