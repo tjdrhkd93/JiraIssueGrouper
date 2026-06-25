@@ -32,6 +32,7 @@ DEFAULT_CONFIG = {
     "slack_bot_token": "",
     "slack_my_uid": "",
     "jql_history": [],
+    "issue_prefix": "",
 }
 
 BG   = "#1e1e2e"
@@ -93,14 +94,23 @@ def fetch_issues(domain, email, token, jql):
     return issues
 
 
-def group_and_format(issues, domain, fmt, mentions):
+def group_and_format(issues, domain, fmt, mentions, grouping=True):
+    base = f"https://{domain}/browse/"
+    total = len(issues)
+
+    if not grouping:
+        # 그룹핑 OFF: 이슈 순서 그대로 flat 출력
+        if fmt == "plain":
+            lines = [f"* {i['key']} ({base}{i['key']}): {i['fields']['summary']}" for i in issues]
+        else:
+            lines = [f"• <{base}{i['key']}|{i['key']}>: {i['fields']['summary']}" for i in issues]
+        return "\n".join(lines).strip(), total, 0, []
+
     groups = {}
     for iss in issues:
         a = (iss["fields"].get("assignee") or {}).get("displayName", "미배정")
         groups.setdefault(a, []).append(iss)
     groups = dict(sorted(groups.items()))
-    base = f"https://{domain}/browse/"
-    total = sum(len(v) for v in groups.values())
 
     if fmt == "plain":
         lines = []
@@ -112,11 +122,9 @@ def group_and_format(issues, domain, fmt, mentions):
             lines.append("")
         return "\n".join(lines).strip(), total, len(groups), list(groups.keys())
 
-    # Slack: preview 텍스트 (결과창용) + blocks (전송용) 분리
     preview_lines = []
     for name, lst in groups.items():
         uid = mentions.get(name, "")
-        # 미리보기는 항상 이름 표시, UID 있으면 함께
         header = f"*{name}*" + (f" <@{uid}>" if uid else "")
         preview_lines.append(header)
         for i in lst:
@@ -127,15 +135,40 @@ def group_and_format(issues, domain, fmt, mentions):
     return preview, total, len(groups), list(groups.keys())
 
 
-def build_slack_blocks(issues, domain, mentions):
-    """담당자별로 blocks 리스트 반환 — 스레드 분할 전송용"""
+def build_slack_blocks(issues, domain, mentions, grouping=True):
+    """담당자별(또는 flat) blocks 리스트 반환 — 스레드 분할 전송용"""
+    base = f"https://{domain}/browse/"
+
+    def _issue_elements(lst):
+        elems = []
+        for i in lst:
+            key = i["key"]
+            summary = i["fields"]["summary"]
+            elems.append({
+                "type": "rich_text_list",
+                "style": "bullet",
+                "indent": 0,
+                "elements": [{"type": "rich_text_section", "elements": [
+                    {"type": "link", "url": f"{base}{key}", "text": key},
+                    {"type": "text", "text": f": {summary}"},
+                ]}]
+            })
+        return elems
+
+    if not grouping:
+        # 그룹핑 OFF: 50개씩 잘라서 블록 분할
+        chunks = [issues[i:i+50] for i in range(0, len(issues), 50)]
+        return [[{
+            "type": "rich_text",
+            "elements": _issue_elements(chunk),
+        }] for chunk in chunks]
+
     groups = {}
     for iss in issues:
         a = (iss["fields"].get("assignee") or {}).get("displayName", "미배정")
         groups.setdefault(a, []).append(iss)
     groups = dict(sorted(groups.items()))
-    base = f"https://{domain}/browse/"
-    assignee_blocks = []  # 담당자별 [blocks] 리스트
+    assignee_blocks = []
 
     for name, lst in groups.items():
         uid = mentions.get(name, "")
@@ -144,28 +177,11 @@ def build_slack_blocks(issues, domain, mentions):
         else:
             header_elements = [{"type": "text", "text": name, "style": {"bold": True}}]
 
-        list_elements = []
-        for i in lst:
-            key = i["key"]
-            summary = i["fields"]["summary"]
-            list_elements.append({
-                "type": "rich_text_list",
-                "style": "bullet",
-                "indent": 0,
-                "elements": [{
-                    "type": "rich_text_section",
-                    "elements": [
-                        {"type": "link", "url": f"{base}{key}", "text": key},
-                        {"type": "text", "text": f": {summary}"},
-                    ]
-                }]
-            })
-
         assignee_blocks.append([{
             "type": "rich_text",
             "elements": [
                 {"type": "rich_text_section", "elements": header_elements},
-                *list_elements,
+                *_issue_elements(lst),
             ]
         }])
 
@@ -195,9 +211,14 @@ def _post_message(bot_token, channel, payload):
     return resp
 
 
-def send_slack_dm(bot_token, user_id, assignee_blocks, total_issues, total_assignees, jql):
+def send_slack_dm(bot_token, user_id, assignee_blocks, total_issues, total_assignees, jql, grouping=True):
     """메인 메시지(요약) 전송 후 담당자별로 스레드에 분할 전송"""
-    # 메인 메시지
+    # 건수 텍스트: 그룹핑 ON/OFF에 따라 다르게
+    if grouping:
+        count_text = f"총 {total_issues}건 / 담당자 {total_assignees}명"
+    else:
+        count_text = f"총 {total_issues}건"
+
     summary_blocks = [
         {
             "type": "rich_text",
@@ -215,7 +236,7 @@ def send_slack_dm(bot_token, user_id, assignee_blocks, total_issues, total_assig
                 "style": "bullet",
                 "elements": [
                     {"type": "rich_text_section", "elements": [
-                        {"type": "text", "text": f"총 {total_issues}건 / 담당자 {total_assignees}명"}
+                        {"type": "text", "text": count_text}
                     ]},
                     {"type": "rich_text_section", "elements": [
                         {"type": "text", "text": "사용 JQL — ", "style": {"bold": True}},
@@ -227,7 +248,7 @@ def send_slack_dm(bot_token, user_id, assignee_blocks, total_issues, total_assig
     ]
     resp = _post_message(bot_token, user_id, {
         "channel": user_id,
-        "text": f"Jira 이슈 조회 결과 — 총 {total_issues}건 / 담당자 {total_assignees}명",
+        "text": f"Jira 이슈 조회 결과 — {count_text}",
         "blocks": summary_blocks,
     })
     thread_ts = resp["ts"]
@@ -287,8 +308,12 @@ class App(tk.Tk):
         self._build_mention_tab(tab2)
 
         tab3 = tk.Frame(nb, bg=BG)
-        nb.add(tab3, text="  설정  ")
-        self._build_settings_tab(tab3)
+        nb.add(tab3, text="  텍스트→JQL  ")
+        self._build_text2jql_tab(tab3)
+
+        tab4 = tk.Frame(nb, bg=BG)
+        nb.add(tab4, text="  설정  ")
+        self._build_settings_tab(tab4)
 
     # ── 조회 탭 ───────────────────────────────────────────────────────────────
 
@@ -341,6 +366,15 @@ class App(tk.Tk):
             tk.Radiobutton(ctrl, text=txt, variable=self.fmt_var, value=val,
                            font=self.f, bg=BG, fg=FG, selectcolor=BG2,
                            activebackground=BG, activeforeground=FG).pack(side="left", padx=(0, 12))
+
+        tk.Frame(ctrl, bg=LINE, width=1).pack(side="left", fill="y", padx=10)
+
+        self.grouping_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(ctrl, text="담당자별 그룹핑", variable=self.grouping_var,
+                       font=self.f, bg=BG, fg=FG, selectcolor=BG2,
+                       activebackground=BG, activeforeground=FG,
+                       command=self._apply_filter).pack(side="left")
+
         self.run_btn = self._btn(ctrl, "▶  조회", self._run, self.fb, accent=True)
         self.run_btn.pack(side="right")
 
@@ -426,6 +460,80 @@ class App(tk.Tk):
         self._btn(btn_row, "저장", self._save_mentions, self.f, accent=True).pack(side="right")
 
         self._reload_mention_rows()
+
+    # ── 텍스트→JQL 탭 ────────────────────────────────────────────────────────
+
+    def _build_text2jql_tab(self, parent):
+        body = tk.Frame(parent, bg=BG, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+
+        # 이슈 prefix 설정
+        prefix_row = tk.Frame(body, bg=BG)
+        prefix_row.pack(fill="x", pady=(0, 10))
+        tk.Label(prefix_row, text="이슈 키 prefix", font=self.fs, bg=BG, fg=FG2, width=14, anchor="w").pack(side="left")
+        self.prefix_var = tk.StringVar(value=self.cfg.get("issue_prefix", ""))
+        e = self._entry(prefix_row, self.prefix_var, self.fmono)
+        e.configure(width=8)
+        e.pack(side="left")
+        self._btn(prefix_row, "저장", self._save_prefix, self.f).pack(side="left", padx=(8, 0))
+        tk.Label(prefix_row, text="예: AB, CD, EF", font=self.f, bg=BG, fg=FG2).pack(side="left", padx=(10, 0))
+
+        tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=(0, 10))
+
+        # 입력 영역
+        tk.Label(body, text="텍스트 붙여넣기", font=self.fs, bg=BG, fg=FG2).pack(anchor="w", pady=(0, 4))
+        input_wrap = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
+        input_wrap.pack(fill="both", expand=True, pady=(0, 8))
+        self.t2j_input = tk.Text(input_wrap, font=self.fmono, wrap="word",
+                                  bg=BG3, fg=FG, insertbackground=FG,
+                                  relief="flat", bd=0, padx=8, pady=8, height=8)
+        sb_in = tk.Scrollbar(input_wrap, command=self.t2j_input.yview, bg=BG2, troughcolor=BG)
+        self.t2j_input.configure(yscrollcommand=sb_in.set)
+        sb_in.pack(side="right", fill="y")
+        self.t2j_input.pack(fill="both", expand=True)
+
+        # 변환 버튼
+        btn_row = tk.Frame(body, bg=BG)
+        btn_row.pack(fill="x", pady=(0, 8))
+        self.t2j_count_lbl = tk.Label(btn_row, text="", font=self.f, bg=BG, fg=FG2)
+        self.t2j_count_lbl.pack(side="left")
+        self._btn(btn_row, "초기화", self._t2j_clear, self.f).pack(side="right", padx=(8, 0))
+        self._btn(btn_row, "▶  변환", self._t2j_convert, self.fb, accent=True).pack(side="right")
+
+        tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=(0, 8))
+
+        # 결과 영역
+        tk.Label(body, text="결과", font=self.fs, bg=BG, fg=FG2).pack(anchor="w", pady=(0, 4))
+
+        # JQL 결과
+        jql_hdr = tk.Frame(body, bg=BG)
+        jql_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(jql_hdr, text="JQL", font=self.fb, bg=BG, fg=FG2).pack(side="left")
+        self._btn(jql_hdr, "복사", lambda: self._t2j_copy("jql"), self.f).pack(side="right")
+        self._btn(jql_hdr, "조회 탭에 적용", self._t2j_apply_jql, self.f).pack(side="right", padx=(0, 8))
+
+        jql_wrap = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
+        jql_wrap.pack(fill="x", pady=(0, 8))
+        self.t2j_jql_text = tk.Text(jql_wrap, font=self.fmono, wrap="word",
+                                     bg=BG3, fg=ACC, insertbackground=FG,
+                                     relief="flat", bd=0, padx=8, pady=6, height=3, state="disabled")
+        self.t2j_jql_text.pack(fill="x")
+
+        # 링크 결과
+        link_hdr = tk.Frame(body, bg=BG)
+        link_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(link_hdr, text="링크 목록", font=self.fb, bg=BG, fg=FG2).pack(side="left")
+        self._btn(link_hdr, "복사", lambda: self._t2j_copy("links"), self.f).pack(side="right")
+
+        link_wrap = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
+        link_wrap.pack(fill="both", expand=True)
+        self.t2j_link_text = tk.Text(link_wrap, font=self.fmono, wrap="word",
+                                      bg=BG3, fg=FG, insertbackground=FG,
+                                      relief="flat", bd=0, padx=8, pady=8, state="disabled")
+        sb_out = tk.Scrollbar(link_wrap, command=self.t2j_link_text.yview, bg=BG2, troughcolor=BG)
+        self.t2j_link_text.configure(yscrollcommand=sb_out.set)
+        sb_out.pack(side="right", fill="y")
+        self.t2j_link_text.pack(fill="both", expand=True)
 
     # ── 설정 탭 ───────────────────────────────────────────────────────────────
 
@@ -585,9 +693,11 @@ class App(tk.Tk):
                 mentions = self.cfg.get("slack_mentions", {})
                 self._last_issues = issues
                 self.after(0, self._clear_filter)
-                result, ti, ta, names = group_and_format(issues, domain, fmt, mentions)
+                grouping = self.grouping_var.get()
+                result, ti, ta, names = group_and_format(issues, domain, fmt, mentions, grouping)
+                count_txt = f"총 {ti}건  /  담당자 {ta}명" if grouping else f"총 {ti}건"
                 self.after(0, lambda: self._set_result(result))
-                self.after(0, lambda: self.count_lbl.configure(text=f"총 {ti}건  /  담당자 {ta}명"))
+                self.after(0, lambda: self.count_lbl.configure(text=count_txt))
                 self.after(0, lambda: self._set_status(f"완료 ({ti}건)", OK))
                 self.after(0, lambda: self._auto_add_assignees(names))
             except Exception as e:
@@ -613,15 +723,16 @@ class App(tk.Tk):
         jql             = self.jql_text.get("1.0", "end").strip()
         mentions        = self.cfg.get("slack_mentions", {})
         filtered        = self._filtered_issues()
-        assignee_blocks = build_slack_blocks(filtered, domain, mentions)
+        grouping        = self.grouping_var.get()
+        assignee_blocks = build_slack_blocks(filtered, domain, mentions, grouping)
         total_issues    = len(filtered)
-        total_assignees = len(assignee_blocks)
+        total_assignees = len(assignee_blocks) if grouping else 0
 
         self.send_btn.configure(state="disabled", text="전송 중…")
 
         def worker():
             try:
-                send_slack_dm(bot_token, my_uid, assignee_blocks, total_issues, total_assignees, jql)
+                send_slack_dm(bot_token, my_uid, assignee_blocks, total_issues, total_assignees, jql, grouping)
                 self.after(0, lambda: self._set_status("✓ Slack DM 전송 완료", OK))
             except Exception as e:
                 msg = str(e)
@@ -661,11 +772,13 @@ class App(tk.Tk):
             self._set_result("(필터 조건에 맞는 이슈 없음)")
             self.count_lbl.configure(text="0건")
             return
-        result, ti, ta, _ = group_and_format(filtered, domain, fmt, mentions)
+        grouping = self.grouping_var.get()
+        result, ti, ta, _ = group_and_format(filtered, domain, fmt, mentions, grouping)
         self._set_result(result)
         total = len(self._last_issues)
         suffix = f"  (전체 {total}건)" if ti < total else ""
-        self.count_lbl.configure(text=f"총 {ti}건  /  담당자 {ta}명{suffix}")
+        count_txt = f"총 {ti}건  /  담당자 {ta}명{suffix}" if grouping else f"총 {ti}건{suffix}"
+        self.count_lbl.configure(text=count_txt)
 
     def _show_history_menu(self):
         history = self.cfg.get("jql_history", [])
@@ -699,6 +812,63 @@ class App(tk.Tk):
         self.cfg["jql_history"] = []
         save_config(self.cfg)
         self._set_status("JQL 기록 삭제됨", OK)
+
+    def _save_prefix(self):
+        self.cfg["issue_prefix"] = self.prefix_var.get().strip().upper()
+        save_config(self.cfg)
+        self._set_status("✓ prefix 저장됨", OK)
+
+    def _t2j_convert(self):
+        import re
+        raw = self.t2j_input.get("1.0", "end")
+        prefix = self.prefix_var.get().strip().upper()
+        if not prefix:
+            self.t2j_count_lbl.configure(text="prefix를 먼저 입력해 주세요")
+            return
+        pattern = rf"{re.escape(prefix)}-\d{{5}}"
+        keys = list(dict.fromkeys(re.findall(pattern, raw)))  # 중복 제거, 순서 유지
+        if not keys:
+            self.t2j_count_lbl.configure(text=f"'{prefix}-XXXXX' 패턴을 찾지 못했습니다")
+            self._t2j_set("jql", "")
+            self._t2j_set("links", "")
+            return
+        domain = self.domain_var.get().strip()
+        base   = f"https://{domain}/browse/"
+        jql    = f"issue in ({', '.join(keys)})"
+        links  = "\n".join(f"{k}: {base}{k}" for k in keys)
+        self._t2j_set("jql", jql)
+        self._t2j_set("links", links)
+        self.t2j_count_lbl.configure(text=f"{len(keys)}개 이슈 키 추출됨")
+
+    def _t2j_set(self, target, text):
+        w = self.t2j_jql_text if target == "jql" else self.t2j_link_text
+        w.configure(state="normal")
+        w.delete("1.0", "end")
+        w.insert("1.0", text)
+        w.configure(state="disabled")
+
+    def _t2j_copy(self, target):
+        w = self.t2j_jql_text if target == "jql" else self.t2j_link_text
+        txt = w.get("1.0", "end").strip()
+        if not txt:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(txt)
+        self._set_status("클립보드에 복사됨", OK)
+
+    def _t2j_apply_jql(self):
+        jql = self.t2j_jql_text.get("1.0", "end").strip()
+        if not jql:
+            return
+        self.jql_text.delete("1.0", "end")
+        self.jql_text.insert("1.0", jql)
+        self._set_status("✓ JQL 적용됨 — 조회 탭에서 실행하세요", OK)
+
+    def _t2j_clear(self):
+        self.t2j_input.delete("1.0", "end")
+        self._t2j_set("jql", "")
+        self._t2j_set("links", "")
+        self.t2j_count_lbl.configure(text="")
 
     def _clear_filter(self):
         self.filter_assignee_var.set("")
