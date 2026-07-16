@@ -192,22 +192,26 @@ def build_slack_blocks(issues, domain, mentions, grouping=True):
 
 
 def _post_message(bot_token, channel, payload):
-    import urllib.request, urllib.error
-    req = urllib.request.Request(
-        "https://slack.com/api/chat.postMessage",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {bot_token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-        method="POST",
-    )
+    import urllib.request, urllib.error, http.client
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    # urllib은 헤더값을 latin-1로 인코딩하려 해서 한글이 포함되면 오류남
+    # http.client 직접 사용으로 우회
+    import ssl
+    ctx = ssl.create_default_context()
+    conn = http.client.HTTPSConnection("slack.com", context=ctx, timeout=15)
+    headers = {
+        "Authorization": f"Bearer {bot_token}",
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": str(len(data)),
+    }
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            resp = json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="replace")
-        raise Exception(f"Slack HTTP {e.code}: {err_body}")
+        conn.request("POST", "/api/chat.postMessage", body=data, headers=headers)
+        r = conn.getresponse()
+        resp = json.loads(r.read().decode("utf-8"))
+    except Exception as e:
+        raise Exception(f"Slack 연결 오류: {e}")
+    finally:
+        conn.close()
     if not resp.get("ok"):
         raise Exception(f"Slack 오류: {resp.get('error', 'unknown')}")
     return resp
