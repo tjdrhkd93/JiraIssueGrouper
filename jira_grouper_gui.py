@@ -15,7 +15,6 @@ from tkinter import messagebox, ttk
 
 
 def get_base_dir() -> Path:
-    """exe(frozen) 환경과 py 환경 모두에서 실행 파일 기준 폴더 반환"""
     if getattr(sys, "frozen", False):
         return Path(sys.executable).parent
     return Path(__file__).parent
@@ -33,6 +32,7 @@ DEFAULT_CONFIG = {
     "slack_my_uid": "",
     "jql_history": [],
     "issue_prefix": "",
+    "presets": [],  # [{"name": "버튼명", "jql": "...", "enabled": True}, ...]
 }
 
 BG   = "#1e1e2e"
@@ -53,6 +53,8 @@ def load_config():
         cfg = {**DEFAULT_CONFIG, **saved}
         if "slack_mentions" not in cfg:
             cfg["slack_mentions"] = {}
+        if "presets" not in cfg:
+            cfg["presets"] = []
         return cfg
     return dict(DEFAULT_CONFIG)
 
@@ -99,7 +101,6 @@ def group_and_format(issues, domain, fmt, mentions, grouping=True):
     total = len(issues)
 
     if not grouping:
-        # 그룹핑 OFF: 이슈 순서 그대로 flat 출력
         if fmt == "plain":
             lines = [f"* {i['key']} ({base}{i['key']}): {i['fields']['summary']}" for i in issues]
         else:
@@ -115,7 +116,7 @@ def group_and_format(issues, domain, fmt, mentions, grouping=True):
     if fmt == "plain":
         lines = []
         for name, lst in groups.items():
-            lines.append(f"* {name}")
+            lines.append(f"* {name} — {len(lst)}개")
             for i in lst:
                 key = i["key"]
                 lines.append(f"   * {key} ({base}{key}): {i['fields']['summary']}")
@@ -125,7 +126,7 @@ def group_and_format(issues, domain, fmt, mentions, grouping=True):
     preview_lines = []
     for name, lst in groups.items():
         uid = mentions.get(name, "")
-        header = f"*{name}*" + (f" <@{uid}>" if uid else "")
+        header = f"*{name}* — {len(lst)}개" + (f" <@{uid}>" if uid else "")
         preview_lines.append(header)
         for i in lst:
             key = i["key"]
@@ -136,7 +137,6 @@ def group_and_format(issues, domain, fmt, mentions, grouping=True):
 
 
 def build_slack_blocks(issues, domain, mentions, grouping=True):
-    """담당자별(또는 flat) blocks 리스트 반환 — 스레드 분할 전송용"""
     base = f"https://{domain}/browse/"
 
     def _issue_elements(lst):
@@ -156,7 +156,6 @@ def build_slack_blocks(issues, domain, mentions, grouping=True):
         return elems
 
     if not grouping:
-        # 그룹핑 OFF: 50개씩 잘라서 블록 분할
         chunks = [issues[i:i+50] for i in range(0, len(issues), 50)]
         return [[{
             "type": "rich_text",
@@ -172,10 +171,14 @@ def build_slack_blocks(issues, domain, mentions, grouping=True):
 
     for name, lst in groups.items():
         uid = mentions.get(name, "")
+        count_elem = {"type": "text", "text": f" — {len(lst)}개"}
         if uid:
-            header_elements = [{"type": "user", "user_id": uid}]
+            header_elements = [{"type": "user", "user_id": uid}, count_elem]
         else:
-            header_elements = [{"type": "text", "text": name, "style": {"bold": True}}]
+            header_elements = [
+                {"type": "text", "text": name, "style": {"bold": True}},
+                count_elem,
+            ]
 
         assignee_blocks.append([{
             "type": "rich_text",
@@ -189,7 +192,6 @@ def build_slack_blocks(issues, domain, mentions, grouping=True):
 
 
 def _post_message(bot_token, channel, payload):
-    """Slack chat.postMessage 단일 호출"""
     import urllib.request, urllib.error
     req = urllib.request.Request(
         "https://slack.com/api/chat.postMessage",
@@ -212,8 +214,6 @@ def _post_message(bot_token, channel, payload):
 
 
 def send_slack_dm(bot_token, user_id, assignee_blocks, total_issues, total_assignees, jql, grouping=True):
-    """메인 메시지(요약) 전송 후 담당자별로 스레드에 분할 전송"""
-    # 건수 텍스트: 그룹핑 ON/OFF에 따라 다르게
     if grouping:
         count_text = f"총 {total_issues}건 / 담당자 {total_assignees}명"
     else:
@@ -222,28 +222,21 @@ def send_slack_dm(bot_token, user_id, assignee_blocks, total_issues, total_assig
     summary_blocks = [
         {
             "type": "rich_text",
-            "elements": [{
-                "type": "rich_text_section",
-                "elements": [
-                    {"type": "text", "text": "Jira 이슈 조회 결과", "style": {"bold": True}},
-                ]
-            }]
+            "elements": [{"type": "rich_text_section", "elements": [
+                {"type": "text", "text": "Jira 이슈 조회 결과", "style": {"bold": True}},
+            ]}]
         },
         {
             "type": "rich_text",
-            "elements": [{
-                "type": "rich_text_list",
-                "style": "bullet",
-                "elements": [
-                    {"type": "rich_text_section", "elements": [
-                        {"type": "text", "text": count_text}
-                    ]},
-                    {"type": "rich_text_section", "elements": [
-                        {"type": "text", "text": "사용 JQL — ", "style": {"bold": True}},
-                        {"type": "text", "text": jql, "style": {"code": True}},
-                    ]},
-                ]
-            }]
+            "elements": [{"type": "rich_text_list", "style": "bullet", "elements": [
+                {"type": "rich_text_section", "elements": [
+                    {"type": "text", "text": count_text}
+                ]},
+                {"type": "rich_text_section", "elements": [
+                    {"type": "text", "text": "사용 JQL — ", "style": {"bold": True}},
+                    {"type": "text", "text": jql, "style": {"code": True}},
+                ]},
+            ]}]
         }
     ]
     resp = _post_message(bot_token, user_id, {
@@ -253,7 +246,6 @@ def send_slack_dm(bot_token, user_id, assignee_blocks, total_issues, total_assig
     })
     thread_ts = resp["ts"]
 
-    # 담당자별 스레드 전송
     for blocks in assignee_blocks:
         _post_message(bot_token, user_id, {
             "channel": user_id,
@@ -269,7 +261,7 @@ class App(tk.Tk):
         self.cfg = load_config()
         self.title("Jira JQL 그루퍼")
         self.configure(bg=BG)
-        self.minsize(720, 660)
+        self.minsize(720, 680)
 
         self.f     = tkfont.Font(family="맑은 고딕", size=10)
         self.fb    = tkfont.Font(family="맑은 고딕", size=10, weight="bold")
@@ -321,6 +313,7 @@ class App(tk.Tk):
         body = tk.Frame(parent, bg=BG, padx=14, pady=12)
         body.pack(fill="both", expand=True)
 
+        # 인증 정보
         tk.Label(body, text="인증 정보", font=self.fs, bg=BG, fg=FG2).pack(anchor="w", pady=(0, 4))
 
         row0 = tk.Frame(body, bg=BG)
@@ -344,9 +337,12 @@ class App(tk.Tk):
 
         tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=8)
 
+        # JQL 입력
         jql_hdr = tk.Frame(body, bg=BG)
         jql_hdr.pack(fill="x", pady=(0, 4))
         tk.Label(jql_hdr, text="JQL", font=self.fs, bg=BG, fg=FG2).pack(side="left")
+        self.preset_name_lbl = tk.Label(jql_hdr, text="", font=self.f, bg=BG, fg=ACC)
+        self.preset_name_lbl.pack(side="left", padx=(6, 0))
         self.history_btn = self._btn(jql_hdr, "▾ 최근 기록", self._show_history_menu, self.f)
         self.history_btn.pack(side="right")
 
@@ -354,32 +350,38 @@ class App(tk.Tk):
                                 bg=BG3, fg=FG, insertbackground=FG,
                                 relief="flat", bd=0, padx=8, pady=6, wrap="word",
                                 highlightthickness=1, highlightbackground=LINE, highlightcolor=ACC)
-        self.jql_text.pack(fill="x", pady=(0, 8))
+        self.jql_text.pack(fill="x", pady=(0, 6))
         if self.cfg.get("last_jql"):
             self.jql_text.insert("1.0", self.cfg["last_jql"])
         self.jql_text.bind("<Control-Return>", lambda e: self._run())
 
-        ctrl = tk.Frame(body, bg=BG)
-        ctrl.pack(fill="x", pady=(0, 8))
+        # 형식 + 그룹핑 옵션
+        opt_row = tk.Frame(body, bg=BG)
+        opt_row.pack(fill="x", pady=(0, 4))
         self.fmt_var = tk.StringVar(value=self.cfg.get("fmt", "slack"))
         for val, txt in [("slack", "Slack mrkdwn"), ("plain", "일반 텍스트")]:
-            tk.Radiobutton(ctrl, text=txt, variable=self.fmt_var, value=val,
+            tk.Radiobutton(opt_row, text=txt, variable=self.fmt_var, value=val,
                            font=self.f, bg=BG, fg=FG, selectcolor=BG2,
                            activebackground=BG, activeforeground=FG).pack(side="left", padx=(0, 12))
-
-        tk.Frame(ctrl, bg=LINE, width=1).pack(side="left", fill="y", padx=10)
-
+        tk.Frame(opt_row, bg=LINE, width=1).pack(side="left", fill="y", padx=10)
         self.grouping_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(ctrl, text="담당자별 그룹핑", variable=self.grouping_var,
+        tk.Checkbutton(opt_row, text="담당자별 그룹핑", variable=self.grouping_var,
                        font=self.f, bg=BG, fg=FG, selectcolor=BG2,
                        activebackground=BG, activeforeground=FG,
                        command=self._apply_filter).pack(side="left")
 
-        self.run_btn = self._btn(ctrl, "▶  조회", self._run, self.fb, accent=True)
+        # 조회 버튼 + 프리셋 버튼 (같은 줄)
+        run_row = tk.Frame(body, bg=BG)
+        run_row.pack(fill="x", pady=(0, 8))
+        self.run_btn = self._btn(run_row, "▶  조회", self._run, self.fb, accent=True)
         self.run_btn.pack(side="right")
+        self.preset_frame = tk.Frame(run_row, bg=BG)
+        self.preset_frame.pack(side="left", fill="x", expand=True)
+        self._rebuild_preset_buttons()
 
         tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=(0, 8))
 
+        # 결과 헤더
         res_hdr = tk.Frame(body, bg=BG)
         res_hdr.pack(fill="x", pady=(0, 4))
         tk.Label(res_hdr, text="결과", font=self.fs, bg=BG, fg=FG2).pack(side="left")
@@ -389,7 +391,7 @@ class App(tk.Tk):
         self.send_btn.pack(side="right")
         self._btn(res_hdr, "복사", self._copy, self.f).pack(side="right", padx=(0, 8))
 
-        # 필터 검색창
+        # 필터
         filter_row = tk.Frame(body, bg=BG)
         filter_row.pack(fill="x", pady=(0, 6))
         tk.Label(filter_row, text="담당자", font=self.f, bg=BG, fg=FG2, width=6, anchor="w").pack(side="left")
@@ -402,6 +404,7 @@ class App(tk.Tk):
         self._entry(filter_row, self.filter_title_var, self.fmono).pack(side="left", fill="x", expand=True, padx=(4, 0))
         self._btn(filter_row, "초기화", self._clear_filter, self.f).pack(side="right", padx=(8, 0))
 
+        # 결과 텍스트
         txt_wrap = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
         txt_wrap.pack(fill="both", expand=True)
         self.result_text = tk.Text(txt_wrap, font=self.fmono, wrap="word",
@@ -412,6 +415,30 @@ class App(tk.Tk):
         sb.pack(side="right", fill="y")
         self.result_text.pack(fill="both", expand=True)
 
+    # ── 프리셋 버튼 ───────────────────────────────────────────────────────────
+
+    def _rebuild_preset_buttons(self):
+        for w in self.preset_frame.winfo_children():
+            w.destroy()
+        presets = [p for p in self.cfg.get("presets", [])
+                   if p.get("enabled") and p.get("name", "").strip() and p.get("jql", "").strip()]
+        for p in presets:
+            name = p.get("name", "")
+            jql  = p.get("jql", "")
+            btn  = tk.Button(self.preset_frame, text=name, font=self.f,
+                             bg=ACC, fg="#ffffff",
+                             activebackground="#5a5adf", activeforeground="#ffffff",
+                             relief="flat", bd=0, padx=12, pady=5, cursor="hand2",
+                             command=lambda n=name, j=jql: self._run_preset(n, j))
+            btn.pack(side="left", padx=(0, 6))
+
+    def _run_preset(self, name, jql):
+        self.jql_text.delete("1.0", "end")
+        self.jql_text.insert("1.0", jql)
+        self._preset_name = name  # 히스토리 제외용 플래그
+        self._run(skip_history=True)
+        self._preset_name = name  # run 후에도 유지
+
     # ── 멘션 설정 탭 ──────────────────────────────────────────────────────────
 
     def _build_mention_tab(self, parent):
@@ -420,10 +447,8 @@ class App(tk.Tk):
 
         desc = tk.Frame(body, bg=BG)
         desc.pack(fill="x", pady=(0, 8))
-        tk.Label(desc, text="담당자별 Slack 멘션 매핑",
-                 font=self.fs, bg=BG, fg=FG2).pack(side="left")
-        tk.Label(desc, text="조회 시 UID 없는 담당자는 자동 추가됩니다",
-                 font=self.f, bg=BG, fg=FG2).pack(side="right")
+        tk.Label(desc, text="담당자별 Slack 멘션 매핑", font=self.fs, bg=BG, fg=FG2).pack(side="left")
+        tk.Label(desc, text="조회 시 UID 없는 담당자는 자동 추가됩니다", font=self.f, bg=BG, fg=FG2).pack(side="right")
 
         hdr = tk.Frame(body, bg=BG2)
         hdr.pack(fill="x")
@@ -467,7 +492,6 @@ class App(tk.Tk):
         body = tk.Frame(parent, bg=BG, padx=14, pady=12)
         body.pack(fill="both", expand=True)
 
-        # 이슈 prefix 설정
         prefix_row = tk.Frame(body, bg=BG)
         prefix_row.pack(fill="x", pady=(0, 10))
         tk.Label(prefix_row, text="이슈 키 prefix", font=self.fs, bg=BG, fg=FG2, width=14, anchor="w").pack(side="left")
@@ -480,7 +504,6 @@ class App(tk.Tk):
 
         tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=(0, 10))
 
-        # 입력 영역
         tk.Label(body, text="텍스트 붙여넣기", font=self.fs, bg=BG, fg=FG2).pack(anchor="w", pady=(0, 4))
         input_wrap = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
         input_wrap.pack(fill="both", expand=True, pady=(0, 8))
@@ -492,7 +515,6 @@ class App(tk.Tk):
         sb_in.pack(side="right", fill="y")
         self.t2j_input.pack(fill="both", expand=True)
 
-        # 변환 버튼
         btn_row = tk.Frame(body, bg=BG)
         btn_row.pack(fill="x", pady=(0, 8))
         self.t2j_count_lbl = tk.Label(btn_row, text="", font=self.f, bg=BG, fg=FG2)
@@ -502,10 +524,8 @@ class App(tk.Tk):
 
         tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=(0, 8))
 
-        # 결과 영역
         tk.Label(body, text="결과", font=self.fs, bg=BG, fg=FG2).pack(anchor="w", pady=(0, 4))
 
-        # JQL 결과
         jql_hdr = tk.Frame(body, bg=BG)
         jql_hdr.pack(fill="x", pady=(0, 4))
         tk.Label(jql_hdr, text="JQL", font=self.fb, bg=BG, fg=FG2).pack(side="left")
@@ -519,7 +539,6 @@ class App(tk.Tk):
                                      relief="flat", bd=0, padx=8, pady=6, height=3, state="disabled")
         self.t2j_jql_text.pack(fill="x")
 
-        # 링크 결과
         link_hdr = tk.Frame(body, bg=BG)
         link_hdr.pack(fill="x", pady=(0, 4))
         tk.Label(link_hdr, text="링크 목록", font=self.fb, bg=BG, fg=FG2).pack(side="left")
@@ -541,6 +560,7 @@ class App(tk.Tk):
         body = tk.Frame(parent, bg=BG, padx=14, pady=12)
         body.pack(fill="both", expand=True)
 
+        # Slack 설정
         tk.Label(body, text="Slack 전송 설정", font=self.fs, bg=BG, fg=FG2).pack(anchor="w", pady=(0, 4))
 
         row0 = tk.Frame(body, bg=BG)
@@ -555,14 +575,180 @@ class App(tk.Tk):
         self.slack_uid_var = tk.StringVar(value=self.cfg.get("slack_my_uid", ""))
         self._entry(row1, self.slack_uid_var, self.fmono).pack(side="left", fill="x", expand=True)
 
-        hint = tk.Frame(body, bg=BG)
-        hint.pack(fill="x", pady=(0, 12))
-        tk.Label(hint,
-                 text="Bot Token: api.slack.com → 앱 → OAuth & Permissions → Bot User OAuth Token (xoxb-...)\n"
+        tk.Label(body,
+                 text="Bot Token: api.slack.com → OAuth & Permissions → Bot User OAuth Token (xoxb-...)\n"
                       "내 User ID: Slack 프로필 클릭 → 멤버 ID 복사 (U로 시작)",
-                 font=self.f, bg=BG, fg=FG2, justify="left").pack(anchor="w")
+                 font=self.f, bg=BG, fg=FG2, justify="left").pack(anchor="w", pady=(0, 8))
 
-        self._btn(body, "저장", self._save_slack_settings, self.f, accent=True).pack(anchor="e")
+        slack_btn_row = tk.Frame(body, bg=BG)
+        slack_btn_row.pack(fill="x")
+        self._btn(slack_btn_row, "📂  설정 파일 폴더 열기", self._open_config_folder, self.f).pack(side="left")
+        self._btn(slack_btn_row, "저장", self._save_slack_settings, self.f, accent=True).pack(side="right")
+
+        tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=10)
+
+        # 프리셋 설정
+        preset_hdr = tk.Frame(body, bg=BG)
+        preset_hdr.pack(fill="x", pady=(0, 6))
+        tk.Label(preset_hdr, text="커스텀 프리셋", font=self.fs, bg=BG, fg=FG2).pack(side="left")
+        tk.Label(preset_hdr, text="체크된 프리셋만 조회 탭에 버튼으로 표시됩니다",
+                 font=self.f, bg=BG, fg=FG2).pack(side="right")
+
+        # 프리셋 테이블 헤더
+        phdr = tk.Frame(body, bg=BG2)
+        phdr.pack(fill="x")
+        tk.Label(phdr, text="노출", font=self.fb, bg=BG2, fg=FG, width=5, pady=5).pack(side="left")
+        tk.Frame(phdr, bg=LINE, width=1).pack(side="left", fill="y")
+        tk.Label(phdr, text="버튼 이름", font=self.fb, bg=BG2, fg=FG, width=14, anchor="w", padx=8, pady=5).pack(side="left")
+        tk.Frame(phdr, bg=LINE, width=1).pack(side="left", fill="y")
+        tk.Label(phdr, text="JQL", font=self.fb, bg=BG2, fg=FG, anchor="w", padx=8, pady=5).pack(side="left", fill="x", expand=True)
+        tk.Label(phdr, text="", font=self.fb, bg=BG2, fg=FG, width=4, pady=5).pack(side="right")
+
+        # 프리셋 스크롤 영역
+        pouter = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
+        pouter.pack(fill="both", expand=True, pady=(0, 8))
+
+        pcanvas = tk.Canvas(pouter, bg=BG3, highlightthickness=0)
+        psb = tk.Scrollbar(pouter, orient="vertical", command=pcanvas.yview, bg=BG2, troughcolor=BG)
+        pcanvas.configure(yscrollcommand=psb.set)
+        psb.pack(side="right", fill="y")
+        pcanvas.pack(side="left", fill="both", expand=True)
+
+        self.preset_list_frame = tk.Frame(pcanvas, bg=BG3)
+        self._preset_canvas_win = pcanvas.create_window((0, 0), window=self.preset_list_frame, anchor="nw")
+
+        def _pc(e):
+            pcanvas.configure(scrollregion=pcanvas.bbox("all"))
+            pcanvas.itemconfig(self._preset_canvas_win, width=pcanvas.winfo_width())
+
+        self.preset_list_frame.bind("<Configure>", _pc)
+        pcanvas.bind("<Configure>", lambda e: pcanvas.itemconfig(self._preset_canvas_win, width=e.width))
+
+        self._preset_rows = []  # [(enabled_var, name_var, jql_var), ...]
+
+        # 버튼 행
+        pbtn_row = tk.Frame(body, bg=BG)
+        pbtn_row.pack(fill="x")
+        self._btn(pbtn_row, "+ 추가", self._add_preset_row, self.f).pack(side="left")
+        self._btn(pbtn_row, "저장", self._save_presets, self.f, accent=True).pack(side="right")
+
+        self._reload_preset_rows()
+
+    # ── 프리셋 관련 ───────────────────────────────────────────────────────────
+
+    def _reload_preset_rows(self):
+        for w in self.preset_list_frame.winfo_children():
+            w.destroy()
+        self._preset_rows.clear()
+        for p in self.cfg.get("presets", []):
+            self._add_preset_row(
+                enabled=p.get("enabled", True),
+                name=p.get("name", ""),
+                jql=p.get("jql", ""),
+            )
+        if not self.cfg.get("presets"):
+            tk.Label(self.preset_list_frame,
+                     text="+ 추가 버튼으로 프리셋을 등록하세요",
+                     font=self.f, bg=BG3, fg=FG2, pady=12).pack()
+
+    def _add_preset_row(self, enabled=True, name="", jql=""):
+        # 힌트 라벨 제거
+        for w in self.preset_list_frame.winfo_children():
+            if isinstance(w, tk.Label):
+                w.destroy()
+
+        row = tk.Frame(self.preset_list_frame, bg=BG3)
+        row.pack(fill="x")
+        tk.Frame(self.preset_list_frame, bg=LINE, height=1).pack(fill="x")
+
+        enabled_var = tk.BooleanVar(value=enabled)
+        name_var    = tk.StringVar(value=name)
+        jql_var     = tk.StringVar(value=jql)
+
+        def _make_toggle(var):
+            btn = tk.Button(row, font=self.f, relief="flat", bd=0,
+                            padx=6, pady=2, cursor="hand2")
+            def _update():
+                if var.get():
+                    btn.configure(text="✓", bg=OK, fg=BG3, activebackground=OK)
+                else:
+                    btn.configure(text="✕", bg=BG2, fg=FG2, activebackground=BG2)
+            def _toggle():
+                var.set(not var.get())
+                _update()
+            btn.configure(command=_toggle)
+            _update()
+            return btn
+        _make_toggle(enabled_var).pack(side="left", padx=(6, 0))
+        tk.Frame(row, bg=LINE, width=1).pack(side="left", fill="y", padx=(4, 0))
+
+        tk.Entry(row, textvariable=name_var, font=self.fmono,
+                 bg=BG3, fg=FG, insertbackground=FG,
+                 relief="flat", bd=0, width=14,
+                 highlightthickness=0).pack(side="left", padx=8, pady=5)
+
+        tk.Frame(row, bg=LINE, width=1).pack(side="left", fill="y")
+
+        tk.Entry(row, textvariable=jql_var, font=self.fmono,
+                 bg=BG3, fg=ACC, insertbackground=FG,
+                 relief="flat", bd=0,
+                 highlightthickness=0).pack(side="left", fill="x", expand=True, padx=8, pady=5)
+
+        entry_tuple = (enabled_var, name_var, jql_var)
+        self._preset_rows.append(entry_tuple)
+
+        # 위/아래/삭제 버튼
+        del_btn = tk.Button(row, text="✕", font=self.f,
+                            bg=BG3, fg=FG2, activebackground=ERR, activeforeground="#fff",
+                            relief="flat", bd=0, padx=6, cursor="hand2")
+        del_btn.pack(side="right", padx=(0, 4))
+
+        down_btn = tk.Button(row, text="▼", font=self.f,
+                             bg=BG3, fg=FG2, activebackground=BG2, activeforeground=FG,
+                             relief="flat", bd=0, padx=4, cursor="hand2")
+        down_btn.pack(side="right")
+
+        up_btn = tk.Button(row, text="▲", font=self.f,
+                           bg=BG3, fg=FG2, activebackground=BG2, activeforeground=FG,
+                           relief="flat", bd=0, padx=4, cursor="hand2")
+        up_btn.pack(side="right")
+
+        def _delete(t=entry_tuple, r=row):
+            name = t[1].get().strip() or "이 프리셋"
+            if not messagebox.askokcancel("삭제 확인", f"'{name}'을(를) 삭제하시겠습니까?",
+                                          icon="warning"):
+                return
+            if t in self._preset_rows:
+                self._preset_rows.remove(t)
+            r.destroy()
+
+        def _move(t=entry_tuple, direction=0):
+            idx = self._preset_rows.index(t)
+            new_idx = idx + direction
+            if new_idx < 0 or new_idx >= len(self._preset_rows):
+                return
+            # 값만 교환
+            a, b = self._preset_rows[idx], self._preset_rows[new_idx]
+            for var_a, var_b in zip(a, b):
+                va, vb = var_a.get(), var_b.get()
+                var_a.set(vb)
+                var_b.set(va)
+
+        del_btn.configure(command=_delete)
+        up_btn.configure(command=lambda: _move(entry_tuple, -1))
+        down_btn.configure(command=lambda: _move(entry_tuple, 1))
+
+    def _save_presets(self):
+        presets = []
+        for ev, nv, jv in self._preset_rows:
+            name = nv.get().strip()
+            jql  = jv.get().strip()
+            if name or jql:
+                presets.append({"enabled": ev.get(), "name": name, "jql": jql})
+        self.cfg["presets"] = presets
+        save_config(self.cfg)
+        self._rebuild_preset_buttons()
+        self._set_status("✓ 프리셋 저장됨", OK)
 
     # ── 멘션 관련 ─────────────────────────────────────────────────────────────
 
@@ -581,7 +767,6 @@ class App(tk.Tk):
         for w in self.mention_frame.winfo_children():
             if isinstance(w, tk.Label):
                 w.destroy()
-
         row = tk.Frame(self.mention_frame, bg=BG3)
         row.pack(fill="x")
         tk.Frame(self.mention_frame, bg=LINE, height=1).pack(fill="x")
@@ -659,24 +844,43 @@ class App(tk.Tk):
         save_config(self.cfg)
         self._set_status("✓ Slack 설정 저장됨", OK)
 
-    def _run(self):
+    def _open_config_folder(self):
+        import subprocess
+        folder = str(get_base_dir())
+        try:
+            if sys.platform == "win32":
+                # 폴더 열면서 config 파일 선택 상태로
+                if CONFIG_FILE.exists():
+                    subprocess.Popen(f'explorer /select,"{CONFIG_FILE}"')
+                else:
+                    subprocess.Popen(f'explorer "{folder}"')
+            elif sys.platform == "darwin":
+                if CONFIG_FILE.exists():
+                    subprocess.Popen(["open", "-R", str(CONFIG_FILE)])
+                else:
+                    subprocess.Popen(["open", folder])
+            else:
+                subprocess.Popen(["xdg-open", folder])
+        except Exception as e:
+            self._set_status(f"폴더 열기 실패: {e}", ERR)
+
+    def _run(self, jql_override=None, skip_history=False):
         domain = self.domain_var.get().strip()
         email  = self.email_var.get().strip()
         token  = self.token_var.get().strip()
-        jql    = self.jql_text.get("1.0", "end").strip()
+        jql    = jql_override or self.jql_text.get("1.0", "end").strip()
         fmt    = self.fmt_var.get()
         if not all([domain, email, token, jql]):
             messagebox.showwarning("입력 확인", "도메인, 이메일, API 토큰, JQL을 모두 입력해 주세요.")
             return
         self.cfg.update({"last_jql": jql, "fmt": fmt})
-        # 히스토리 저장 (최대 10개, 중복 제거 후 가장 최근이 뒤로)
         import datetime
-        ts = datetime.datetime.now().strftime("%y-%m-%d %H:%M:%S")
-        history = self.cfg.get("jql_history", [])
-        # 동일 JQL 있으면 제거
-        history = [h for h in history if h.get("jql") != jql]
-        history.append({"jql": jql, "ts": ts})
-        self.cfg["jql_history"] = history[-10:]
+        if not skip_history:
+            ts = datetime.datetime.now().strftime("%y-%m-%d %H:%M:%S")
+            history = self.cfg.get("jql_history", [])
+            history = [h for h in history if h.get("jql") != jql]
+            history.append({"jql": jql, "ts": ts})
+            self.cfg["jql_history"] = history[-10:]
         save_config(self.cfg)
         self.run_btn.configure(state="disabled", text="조회 중…")
         self._set_status("", "")
@@ -698,6 +902,12 @@ class App(tk.Tk):
                 count_txt = f"총 {ti}건  /  담당자 {ta}명" if grouping else f"총 {ti}건"
                 self.after(0, lambda: self._set_result(result))
                 self.after(0, lambda: self.count_lbl.configure(text=count_txt))
+                preset_name = getattr(self, "_preset_name", None)
+                if preset_name:
+                    self.after(0, lambda pn=preset_name: self._set_preset_label(pn))
+                    self._preset_name = None
+                else:
+                    self.after(0, lambda: self._set_preset_label(None))
                 self.after(0, lambda: self._set_status(f"완료 ({ti}건)", OK))
                 self.after(0, lambda: self._auto_add_assignees(names))
             except Exception as e:
@@ -744,7 +954,6 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _filtered_issues(self):
-        """현재 필터 조건에 맞는 이슈 반환"""
         if not hasattr(self, "_last_issues") or not self._last_issues:
             return []
         assignee_kw = self.filter_assignee_var.get().strip().lower()
@@ -761,7 +970,6 @@ class App(tk.Tk):
         return result
 
     def _apply_filter(self):
-        """필터 변경 시 결과창 즉시 갱신"""
         if not hasattr(self, "_last_issues") or not self._last_issues:
             return
         domain   = self.domain_var.get().strip()
@@ -786,9 +994,7 @@ class App(tk.Tk):
             self._set_status("저장된 JQL 기록 없음", FG2)
             return
         menu = tk.Menu(self, tearoff=0, bg=BG2, fg=FG, activebackground=ACC,
-                       activeforeground="#fff", font=self.fmono,
-                       relief="flat", bd=0)
-        # 오래된 것부터 1번, 가장 최근이 마지막 번호
+                       activeforeground="#fff", font=self.fmono, relief="flat", bd=0)
         for idx, entry in enumerate(history, 1):
             if isinstance(entry, dict):
                 jql = entry.get("jql", "")
@@ -826,7 +1032,7 @@ class App(tk.Tk):
             self.t2j_count_lbl.configure(text="prefix를 먼저 입력해 주세요")
             return
         pattern = rf"{re.escape(prefix)}-\d{{5}}"
-        keys = list(dict.fromkeys(re.findall(pattern, raw)))  # 중복 제거, 순서 유지
+        keys = list(dict.fromkeys(re.findall(pattern, raw)))
         if not keys:
             self.t2j_count_lbl.configure(text=f"'{prefix}-XXXXX' 패턴을 찾지 못했습니다")
             self._t2j_set("jql", "")
@@ -869,6 +1075,12 @@ class App(tk.Tk):
         self._t2j_set("jql", "")
         self._t2j_set("links", "")
         self.t2j_count_lbl.configure(text="")
+
+    def _set_preset_label(self, name):
+        if name:
+            self.preset_name_lbl.configure(text=f"— {name} 검색")
+        else:
+            self.preset_name_lbl.configure(text="")
 
     def _clear_filter(self):
         self.filter_assignee_var.set("")
