@@ -192,26 +192,24 @@ def build_slack_blocks(issues, domain, mentions, grouping=True):
 
 
 def _post_message(bot_token, channel, payload):
-    import urllib.request, urllib.error, http.client
-    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    # urllib은 헤더값을 latin-1로 인코딩하려 해서 한글이 포함되면 오류남
-    # http.client 직접 사용으로 우회
-    import ssl
-    ctx = ssl.create_default_context()
-    conn = http.client.HTTPSConnection("slack.com", context=ctx, timeout=15)
-    headers = {
-        "Authorization": f"Bearer {bot_token}",
-        "Content-Type": "application/json; charset=utf-8",
-        "Content-Length": str(len(data)),
-    }
+    import urllib.request, urllib.error
+    # ensure_ascii=True 로 한글을 \uXXXX 이스케이프 처리 → 헤더 latin-1 오류 방지
+    data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    req = urllib.request.Request(
+        "https://slack.com/api/chat.postMessage",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {bot_token.strip()}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
     try:
-        conn.request("POST", "/api/chat.postMessage", body=data, headers=headers)
-        r = conn.getresponse()
-        resp = json.loads(r.read().decode("utf-8"))
-    except Exception as e:
-        raise Exception(f"Slack 연결 오류: {e}")
-    finally:
-        conn.close()
+        with urllib.request.urlopen(req, timeout=15) as r:
+            resp = json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        raise Exception(f"Slack HTTP {e.code}: {err_body}")
     if not resp.get("ok"):
         raise Exception(f"Slack 오류: {resp.get('error', 'unknown')}")
     return resp
@@ -308,8 +306,12 @@ class App(tk.Tk):
         self._build_text2jql_tab(tab3)
 
         tab4 = tk.Frame(nb, bg=BG)
-        nb.add(tab4, text="  설정  ")
-        self._build_settings_tab(tab4)
+        nb.add(tab4, text="  이슈 링크  ")
+        self._build_issue_link_tab(tab4)
+
+        tab5 = tk.Frame(nb, bg=BG)
+        nb.add(tab5, text="  설정  ")
+        self._build_settings_tab(tab5)
 
     # ── 조회 탭 ───────────────────────────────────────────────────────────────
 
@@ -557,6 +559,81 @@ class App(tk.Tk):
         self.t2j_link_text.configure(yscrollcommand=sb_out.set)
         sb_out.pack(side="right", fill="y")
         self.t2j_link_text.pack(fill="both", expand=True)
+
+    # ── 이슈 링크 탭 ─────────────────────────────────────────────────────────
+
+    def _build_issue_link_tab(self, parent):
+        body = tk.Frame(parent, bg=BG, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+
+        # 텍스트 입력
+        tk.Label(body, text="텍스트 붙여넣기", font=self.fs, bg=BG, fg=FG2).pack(anchor="w", pady=(0, 4))
+        in_wrap = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
+        in_wrap.pack(fill="x", pady=(0, 6))
+        self.il_input = tk.Text(in_wrap, font=self.fmono, wrap="word",
+                                bg=BG3, fg=FG, insertbackground=FG,
+                                relief="flat", bd=0, padx=8, pady=6, height=5)
+        sb_in = tk.Scrollbar(in_wrap, command=self.il_input.yview, bg=BG2, troughcolor=BG)
+        self.il_input.configure(yscrollcommand=sb_in.set)
+        sb_in.pack(side="right", fill="y")
+        self.il_input.pack(fill="x")
+
+        # prefix + 추출 버튼
+        ctrl = tk.Frame(body, bg=BG)
+        ctrl.pack(fill="x", pady=(0, 8))
+        tk.Label(ctrl, text="prefix", font=self.f, bg=BG, fg=FG2).pack(side="left")
+        self.il_prefix_var = tk.StringVar(value=self.cfg.get("issue_prefix", ""))
+        e = self._entry(ctrl, self.il_prefix_var, self.fmono)
+        e.configure(width=6)
+        e.pack(side="left", padx=(6, 0))
+        self.il_count_lbl = tk.Label(ctrl, text="", font=self.f, bg=BG, fg=FG2)
+        self.il_count_lbl.pack(side="left", padx=(12, 0))
+        self._btn(ctrl, "초기화", self._il_clear, self.f).pack(side="right", padx=(8, 0))
+        self._btn(ctrl, "▶  추출", self._il_extract, self.fb, accent=True).pack(side="right")
+
+        tk.Frame(body, bg=LINE, height=1).pack(fill="x", pady=(0, 8))
+
+        # 이슈 목록 (체크박스 + 라디오)
+        list_hdr = tk.Frame(body, bg=BG)
+        list_hdr.pack(fill="x", pady=(0, 4))
+        tk.Label(list_hdr, text="이슈 목록", font=self.fs, bg=BG, fg=FG2).pack(side="left")
+        tk.Label(list_hdr, text="초록✓ 선택   빨강✓ 헤드(blocks 기준)", font=self.f, bg=BG, fg=FG2).pack(side="right")
+
+        list_outer = tk.Frame(body, bg=BG3, highlightthickness=1, highlightbackground=LINE)
+        list_outer.pack(fill="both", expand=True, pady=(0, 8))
+
+        list_canvas = tk.Canvas(list_outer, bg=BG3, highlightthickness=0)
+        list_sb = tk.Scrollbar(list_outer, orient="vertical", command=list_canvas.yview,
+                                bg=BG2, troughcolor=BG)
+        list_canvas.configure(yscrollcommand=list_sb.set)
+        list_sb.pack(side="right", fill="y")
+        list_canvas.pack(side="left", fill="both", expand=True)
+
+        self.il_list_frame = tk.Frame(list_canvas, bg=BG3)
+        self._il_list_win = list_canvas.create_window((0, 0), window=self.il_list_frame, anchor="nw")
+
+        def _lc(e):
+            list_canvas.configure(scrollregion=list_canvas.bbox("all"))
+            list_canvas.itemconfig(self._il_list_win, width=list_canvas.winfo_width())
+        self.il_list_frame.bind("<Configure>", _lc)
+        list_canvas.bind("<Configure>", lambda e: list_canvas.itemconfig(self._il_list_win, width=e.width))
+
+        self._il_items = []  # [(key, check_var, head_var_shared), ...]
+        self._il_head_var = tk.StringVar(value="")  # 라디오버튼 공유 변수
+
+        # 전체선택/해제
+        sel_row = tk.Frame(body, bg=BG)
+        sel_row.pack(fill="x", pady=(0, 6))
+        self._btn(sel_row, "전체 선택", lambda: self._il_select_all(True), self.f).pack(side="left")
+        self._btn(sel_row, "전체 해제", lambda: self._il_select_all(False), self.f).pack(side="left", padx=(6, 0))
+
+        # 액션 버튼
+        act_row = tk.Frame(body, bg=BG)
+        act_row.pack(fill="x")
+        self._btn(act_row, "🔗  Relates 링크", self._il_do_relates, self.f, accent=True).pack(side="left")
+        self._btn(act_row, "⬆  Blocks 링크", self._il_do_blocks, self.f, accent=True).pack(side="left", padx=(8, 0))
+        self.il_status_lbl = tk.Label(act_row, text="", font=self.f, bg=BG, fg=FG2)
+        self.il_status_lbl.pack(side="left", padx=(12, 0))
 
     # ── 설정 탭 ───────────────────────────────────────────────────────────────
 
@@ -1022,6 +1099,189 @@ class App(tk.Tk):
         self.cfg["jql_history"] = []
         save_config(self.cfg)
         self._set_status("JQL 기록 삭제됨", OK)
+
+    # ── 이슈 링크 탭 메서드 ──────────────────────────────────────────────────
+
+    def _il_extract(self):
+        import re
+        raw    = self.il_input.get("1.0", "end")
+        prefix = self.il_prefix_var.get().strip().upper()
+        if not prefix:
+            self.il_count_lbl.configure(text="prefix를 입력해 주세요")
+            return
+        pattern = rf"{re.escape(prefix)}-\d{{5}}"
+        keys = list(dict.fromkeys(re.findall(pattern, raw)))
+        if not keys:
+            self.il_count_lbl.configure(text=f"'{prefix}-XXXXX' 패턴 없음")
+            return
+        self._il_render_list(keys)
+        self.il_count_lbl.configure(text=f"{len(keys)}개 추출됨")
+
+    def _il_render_list(self, keys):
+        for w in self.il_list_frame.winfo_children():
+            w.destroy()
+        self._il_items.clear()
+        self._il_head_var.set("")
+        domain = self.domain_var.get().strip()
+        base   = f"https://{domain}/browse/"
+
+        for key in keys:
+            row = tk.Frame(self.il_list_frame, bg=BG3)
+            row.pack(fill="x")
+            tk.Frame(self.il_list_frame, bg=LINE, height=1).pack(fill="x")
+
+            check_var = tk.BooleanVar(value=True)
+
+            # 선택 토글
+            def _make_toggle(cv, r=row):
+                btn = tk.Button(r, font=self.f, relief="flat", bd=0,
+                                padx=6, pady=2, cursor="hand2")
+                def _update(b=btn, v=cv):
+                    if v.get():
+                        b.configure(text="✓", bg=OK, fg=BG3, activebackground=OK)
+                    else:
+                        b.configure(text="–", bg=BG2, fg=FG2, activebackground=BG2)
+                def _toggle(b=btn, v=cv):
+                    v.set(not v.get())
+                    _update(b, v)
+                btn.configure(command=_toggle)
+                _update(btn, cv)
+                return btn
+            _make_toggle(check_var).pack(side="left", padx=(6, 0))
+
+            # 헤드 토글 버튼 (빨간 체크, 하나만 선택)
+            head_btn = tk.Button(row, text=" ", font=self.f, relief="flat", bd=0,
+                                 padx=6, pady=2, cursor="hand2",
+                                 bg="#5a1f1f", fg="#5a1f1f",
+                                 activebackground="#5a1f1f", activeforeground="#5a1f1f")
+
+            def _set_head(k=key):
+                if self._il_head_var.get() == k:
+                    # 이미 선택된 거 누르면 해제
+                    self._il_head_var.set("")
+                else:
+                    self._il_head_var.set(k)
+                self._il_refresh_head_btns()
+
+            head_btn.configure(command=_set_head)
+            head_btn.pack(side="left", padx=(4, 0))
+
+            # 이슈 키 + 링크
+            tk.Label(row, text=key, font=self.fb, bg=BG3, fg=FG,
+                     width=12, anchor="w").pack(side="left", padx=(8, 0))
+            tk.Label(row, text=f"{base}{key}", font=self.fmono, bg=BG3, fg=FG2).pack(
+                side="left", padx=(4, 0))
+
+            self._il_items.append((key, check_var, head_btn))
+
+    def _il_select_all(self, val):
+        for key, cv, *_ in self._il_items:
+            cv.set(val)
+        # 토글 버튼 텍스트 갱신
+        for row in self.il_list_frame.winfo_children():
+            if not isinstance(row, tk.Frame):
+                continue
+            for w in row.winfo_children():
+                if isinstance(w, tk.Button) and w.cget("text") in ("✓", "–"):
+                    w.configure(
+                        text="✓" if val else "–",
+                        bg=OK if val else BG2,
+                        fg=BG3 if val else FG2,
+                    )
+
+    def _il_refresh_head_btns(self):
+        """헤드 변경 시 모든 버튼 색상 갱신"""
+        head = self._il_head_var.get()
+        for k, cv, hb in self._il_items:
+            if head == k:
+                hb.configure(text="✓", bg="#cc2222", fg="#ffffff",
+                             activebackground="#cc2222", activeforeground="#ffffff")
+            else:
+                hb.configure(text=" ", bg="#5a1f1f", fg="#5a1f1f",
+                             activebackground="#5a1f1f", activeforeground="#5a1f1f")
+
+    def _il_selected_keys(self):
+        return [k for k, cv, _ in self._il_items if cv.get()]
+
+    def _il_link_issues(self, inward_key, outward_key, link_type):
+        """Jira REST API로 이슈 링크 생성"""
+        import urllib.request, urllib.error
+        domain = self.domain_var.get().strip()
+        email  = self.email_var.get().strip()
+        token  = self.token_var.get().strip()
+        b64    = b64encode(f"{email}:{token}".encode()).decode()
+        url    = f"https://{domain}/rest/api/3/issueLink"
+        payload = {
+            "type": {"name": link_type},
+            "inwardIssue":  {"key": inward_key},
+            "outwardIssue": {"key": outward_key},
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req  = urllib.request.Request(url, data=data, headers={
+            "Authorization": f"Basic {b64}",
+            "Content-Type":  "application/json",
+            "Accept":        "application/json",
+        }, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                pass  # 201 No Content
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            raise Exception(f"{inward_key}→{outward_key} 링크 실패: {e.code} {body[:120]}")
+
+    def _il_do_relates(self):
+        keys = self._il_selected_keys()
+        if len(keys) < 2:
+            self.il_status_lbl.configure(text="2개 이상 선택해 주세요", fg=ERR)
+            return
+        self.il_status_lbl.configure(text="링크 중…", fg=FG2)
+
+        def worker():
+            try:
+                pairs = [(keys[i], keys[j])
+                         for i in range(len(keys))
+                         for j in range(i+1, len(keys))]
+                for a, b in pairs:
+                    self._il_link_issues(a, b, "Relates")
+                msg = f"✓ Relates 링크 완료 ({len(pairs)}쌍)"
+                self.after(0, lambda: self.il_status_lbl.configure(text=msg, fg=OK))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self.il_status_lbl.configure(text=err, fg=ERR))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _il_do_blocks(self):
+        head = self._il_head_var.get()
+        if not head:
+            self.il_status_lbl.configure(text="★ 헤드 이슈를 선택해 주세요", fg=ERR)
+            return
+        keys = [k for k in self._il_selected_keys() if k != head]
+        if not keys:
+            self.il_status_lbl.configure(text="헤드 외 선택된 이슈가 없습니다", fg=ERR)
+            return
+        self.il_status_lbl.configure(text="링크 중…", fg=FG2)
+
+        def worker():
+            try:
+                for k in keys:
+                    self._il_link_issues(head, k, "Blocks")
+                msg = f"✓ Blocks 링크 완료 ({head} → {len(keys)}건)"
+                self.after(0, lambda: self.il_status_lbl.configure(text=msg, fg=OK))
+            except Exception as e:
+                err = str(e)
+                self.after(0, lambda: self.il_status_lbl.configure(text=err, fg=ERR))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _il_clear(self):
+        self.il_input.delete("1.0", "end")
+        for w in self.il_list_frame.winfo_children():
+            w.destroy()
+        self._il_items.clear()
+        self._il_head_var.set("")
+        self.il_count_lbl.configure(text="")
+        self.il_status_lbl.configure(text="")
 
     def _save_prefix(self):
         self.cfg["issue_prefix"] = self.prefix_var.get().strip().upper()
