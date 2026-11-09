@@ -1109,10 +1109,10 @@ class App(tk.Tk):
         if not prefix:
             self.il_count_lbl.configure(text="prefix를 입력해 주세요")
             return
-        pattern = rf"{re.escape(prefix)}-\d{{5}}"
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(prefix)}-\d+"
         keys = list(dict.fromkeys(re.findall(pattern, raw)))
         if not keys:
-            self.il_count_lbl.configure(text=f"'{prefix}-XXXXX' 패턴 없음")
+            self.il_count_lbl.configure(text=f"'{prefix}-숫자' 형식 없음")
             return
         self._il_render_list(keys)
         self.il_count_lbl.configure(text=f"{len(keys)}개 추출됨")
@@ -1295,10 +1295,10 @@ class App(tk.Tk):
         if not prefix:
             self.t2j_count_lbl.configure(text="prefix를 먼저 입력해 주세요")
             return
-        pattern = rf"{re.escape(prefix)}-\d{{5}}"
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(prefix)}-\d+"
         keys = list(dict.fromkeys(re.findall(pattern, raw)))
         if not keys:
-            self.t2j_count_lbl.configure(text=f"'{prefix}-XXXXX' 패턴을 찾지 못했습니다")
+            self.t2j_count_lbl.configure(text=f"'{prefix}-숫자' 형식의 이슈 키를 찾지 못했습니다")
             self._t2j_set("jql", "")
             self._t2j_set("links", "")
             return
